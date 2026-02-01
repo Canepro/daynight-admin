@@ -48,9 +48,13 @@ jobs:
       - name: Tag image for ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker tag daynight-admin:latest ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
+          docker tag daynight-admin:latest ${IMAGE}:${{ github.run_number }}
+          docker tag daynight-admin:latest ${IMAGE}:latest
 
       - name: Push image to ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
+          docker push ${IMAGE}:${{ github.run_number }}
+          docker push ${IMAGE}:latest
