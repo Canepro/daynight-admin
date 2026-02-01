@@ -138,6 +138,9 @@ jobs:
             "${{ secrets.SSH_USER }}@${{ secrets.EC2_HOST }}" \
             "export ECR_REGISTRY='$ECR_REGISTRY' IMAGE_URI='$IMAGE_URI' AWS_REGION='$AWS_REGION'; bash -s" << 'REMOTE'
           set -e
+          export PATH="/usr/local/bin:/usr/bin:/snap/bin:$PATH"
+          command -v aws >/dev/null 2>&1 || { echo "::error::EC2: Install AWS CLI (e.g. sudo apt-get install -y awscli)"; exit 127; }
+          command -v docker >/dev/null 2>&1 || { echo "::error::EC2: Install Docker (e.g. sudo apt-get install -y docker.io && sudo usermod -aG docker $USER)"; exit 127; }
           CONTAINER_NAME="daynight-admin"
           aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$ECR_REGISTRY"
