@@ -1,9 +1,9 @@
 # =============================================================================
-# CI: Build Docker image, push to AWS ECR on push to main
+# CI: Build Docker image, push to ECR, deploy to EC2 on push to main
 # =============================================================================
 # Triggers: push / PR to main, or manual (workflow_dispatch)
-# Secrets:   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-# Best practice: Pin actions to a full commit SHA in production for immutability
+# Secrets:   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, EC2_HOST, SSH_USER, SSH_PRIVATE_KEY
+# EC2 must have: Docker, AWS CLI, IAM instance profile with ECR pull permission
 # =============================================================================
 
 name: CI
@@ -111,3 +111,43 @@ jobs:
           echo "|-----|-----------|" >> $GITHUB_STEP_SUMMARY
           echo "| \`${{ github.run_number }}\` | \`${IMAGE}:${{ github.run_number }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| \`latest\` | \`${IMAGE}:latest\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Deploy to EC2: runs after build on push to main (pull :latest, restart container)
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy image on EC2
+        env:
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+          IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.SSH_USER }}@${{ secrets.EC2_HOST }}" \
+            "export ECR_REGISTRY='$ECR_REGISTRY' IMAGE_URI='$IMAGE_URI' AWS_REGION='$AWS_REGION'; bash -s" << 'REMOTE'
+          set -e
+          CONTAINER_NAME="daynight-admin"
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          docker pull "$IMAGE_URI"
+          docker stop "$CONTAINER_NAME" 2>/dev/null || true
+          docker rm "$CONTAINER_NAME" 2>/dev/null || true
+          docker run -d --name "$CONTAINER_NAME" -p 80:80 --restart unless-stopped "$IMAGE_URI"
+          REMOTE
+
+      - name: Add job summary
+        run: |
+          echo "## Deployed to EC2" >> $GITHUB_STEP_SUMMARY
+          echo "Image \`daynight-admin:latest\` running on EC2 (port 80)." >> $GITHUB_STEP_SUMMARY

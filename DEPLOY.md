@@ -1,73 +1,100 @@
-# Deploy this site to AWS EC2 with GitHub Actions
+# Deploy daynight-admin to AWS
 
-This repo includes a GitHub Actions workflow that deploys the static site to an EC2 instance, installs nginx, and serves the app. Follow these steps **before** pushing to GitHub.
+This repo has two workflows:
 
-## 1. Create an EC2 instance
+1. **CI** – Builds the Docker image and pushes it to ECR (tags: `:run_number`, `:latest`).
+2. **Deploy to EC2** – Runs after CI on `main` (or manually), SSHs to EC2, pulls `:latest` from ECR, and runs the container on port 80.
 
-1. In **AWS Console** → EC2 → **Launch instance**.
-2. **Name:** e.g. `daynight-admin`.
-3. **AMI:** **Ubuntu Server** (choose the latest version; workflow installs nginx via `apt`).
-4. **Instance type:** e.g. `t2.micro` (free tier).
-5. **Key pair:** Create or select an existing key pair and **download the `.pem` file** (you’ll use it for GitHub and for SSH).
-6. **Network / Security group:**
-   - Allow **SSH (22)** from your IP or from `0.0.0.0/0` if you’re okay with GitHub’s IPs (see [GitHub IP ranges](https://api.github.com/meta) or use a self-hosted runner later).
-   - Allow **HTTP (80)** from `0.0.0.0/0` so the site is reachable.
-7. Launch the instance and note its **public IP** or **public DNS** (e.g. `ec2-xx-xx-xx-xx.compute-1.amazonaws.com`).
+---
 
-## 2. Prepare the EC2 instance for deployment
+## GitHub secrets
 
-SSH into the instance (replace key and host; Ubuntu user is `ubuntu`):
+**Settings → Secrets and variables → Actions** – add:
+
+| Secret | Used by | Value |
+|--------|---------|--------|
+| `AWS_ACCESS_KEY_ID` | CI (build + push to ECR) | Your AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | CI | Your AWS secret key |
+| `EC2_HOST` | Deploy | EC2 public IP or DNS (e.g. `ec2-xx-xx.compute-1.amazonaws.com`) |
+| `SSH_USER` | Deploy | `ubuntu` (Ubuntu AMI) |
+| `SSH_PRIVATE_KEY` | Deploy | Full contents of your `.pem` file |
+
+---
+
+## ECR
+
+Create the repository (once) in **us-east-1**:
 
 ```bash
-ssh -i /path/to/your-key.pem ubuntu@<EC2_PUBLIC_IP_OR_DNS>
+aws ecr create-repository --repository-name daynight-admin --region us-east-1
 ```
 
-No need to install nginx manually; the workflow will install it via `apt` and configure `/var/www/html`.
+Attach the policy in `ecr-policy.json` to the IAM user used by CI (e.g. `remote-user`).
 
-## 3. Create a GitHub repo and add secrets
+---
 
-1. Create a **new repository** on GitHub (e.g. `daynight-admin`).
-2. In the repo: **Settings** → **Secrets and variables** → **Actions** → **New repository secret**. Add:
+## EC2 instance (for Deploy workflow)
 
-   | Secret name       | Value |
-   |-------------------|--------|
-   | `EC2_HOST`        | EC2 public IP or public DNS (e.g. `ec2-xx-xx-xx-xx.compute-1.amazonaws.com`). No `ssh://` or port. |
-   | `SSH_USER`        | `ubuntu` (Ubuntu AMI default user). |
-   | `SSH_PRIVATE_KEY` | Full contents of your `.pem` file (the private key you downloaded). Copy-paste including `-----BEGIN ... KEY-----` and `-----END ... KEY-----`. |
+1. **Launch** – Ubuntu, latest; key pair (save `.pem` for `SSH_PRIVATE_KEY`); security group: **SSH (22)** and **HTTP (80)**.
+2. **IAM instance profile** – Attach a role that can pull from ECR, e.g. policy:
 
-3. Push your local repo to GitHub (main branch):
-
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git branch -M main
-   git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-   git push -u origin main
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "ecr:GetAuthorizationToken",
+         "Resource": "*"
+       },
+       {
+         "Effect": "Allow",
+         "Action": [
+           "ecr:BatchCheckLayerAvailability",
+           "ecr:GetDownloadUrlForLayer",
+           "ecr:BatchGetImage"
+         ],
+         "Resource": "arn:aws:ecr:us-east-1:534208808141:repository/daynight-admin"
+       }
+     ]
+   }
    ```
 
-## 4. What the workflow does
+   Create a role with this policy and attach it to the EC2 instance (Instance → Actions → Security → Modify IAM role).
 
-- **Trigger:** Runs on every **push to `main`** (change `branches` in `deploy.yml` if you use another branch).
-- **Steps:**
-  1. Checkout the repo.
-  2. Configure SSH using `SSH_PRIVATE_KEY` and `EC2_HOST`.
-  3. SSH into EC2 and **install nginx** (if not already installed), create `/var/www/html`, set ownership, point nginx’s default config at `/var/www/html`, and start nginx.
-  4. **Rsync** the project files (excluding `.git` and `.github`) to `/var/www/html/` on the instance.
-  5. **Reload nginx** so the new files are served.
+3. **Docker on EC2** – After first login:
 
-After a successful run, open `http://<EC2_PUBLIC_IP_OR_DNS>` in a browser to see the site.
+   ```bash
+   ssh -i your-key.pem ubuntu@<EC2_HOST>
+   sudo apt-get update && sudo apt-get install -y docker.io
+   sudo usermod -aG docker ubuntu
+   # Log out and back in so `docker` works without sudo
+   ```
 
-## 5. Optional: restrict SSH to GitHub IPs
+   (Or use an AMI / user data that installs Docker.)
 
-To allow only GitHub Actions (and optionally your IP) to SSH:
+4. **AWS CLI on EC2** (for ECR login):
 
-- In the EC2 security group, replace “any” for port 22 with:
-  - Your IP for manual SSH, and/or
-  - GitHub’s IP ranges (from the [API meta](https://api.github.com/meta) – “actions” or “hooks” list). These change occasionally, so some people use a small CIDR or a self-hosted runner in a fixed VPC instead.
+   ```bash
+   sudo apt-get install -y awscli
+   ```
 
-## 6. Troubleshooting
+   The instance profile supplies credentials; no keys on the host.
 
-- **Permission denied (publickey):** Check that `SSH_PRIVATE_KEY` is the full `.pem` content and that `SSH_USER` matches your AMI (`ec2-user` for Amazon Linux, `ubuntu` for Ubuntu).
-- **Connection timed out:** Security group must allow TCP 22 from the IPs GitHub Actions uses (or from anywhere for testing).
-- **Site not loading:** Ensure port 80 is open in the security group and that the “Install nginx and prepare docroot” and “Reload nginx” steps completed without errors in the workflow log.
+---
+
+## Flow
+
+- **Push to `main`** → CI runs → image pushed to ECR (`:run_number`, `:latest`) → Deploy runs → EC2 pulls `:latest` and restarts the container.
+- **Manual deploy** → Actions → “Deploy to EC2” → Run workflow → EC2 pulls `:latest` and restarts.
+
+After a successful deploy, open `http://<EC2_HOST>` in a browser.
+
+---
+
+## Troubleshooting
+
+- **Deploy: Permission denied (publickey)** – Check `SSH_PRIVATE_KEY` (full `.pem`) and `SSH_USER` (e.g. `ubuntu`).
+- **Deploy: Connection timed out** – Security group must allow TCP 22 from GitHub Actions IPs (or your IP / `0.0.0.0/0` for testing).
+- **EC2: Cannot pull image / access denied** – Instance must have an IAM role with ECR pull permission for `daynight-admin`.
+- **Site not loading** – Port 80 must be open in the security group; on EC2 run `docker ps` and `docker logs daynight-admin`.
