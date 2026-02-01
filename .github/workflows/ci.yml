@@ -1,6 +1,10 @@
-# CI pipeline: Build Docker image, push to AWS ECR on main
-# Trigger: push or PR to main
-# Secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+# =============================================================================
+# CI: Build Docker image, push to AWS ECR on push to main
+# =============================================================================
+# Triggers: push / PR to main, or manual (workflow_dispatch)
+# Secrets:   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+# Best practice: Pin actions to a full commit SHA in production for immutability
+# =============================================================================
 
 name: CI
 
@@ -11,7 +15,20 @@ on:
   pull_request:
     branches:
       - main
+  # Allow manual run from Actions tab
+  workflow_dispatch:
 
+# Cancel in-progress runs when a new run is triggered on the same branch
+# Saves runner time and avoids pushing an outdated image
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: only read repo contents; no packages write unless needed
+permissions:
+  contents: read
+
+# Shared env so ECR registry/repo and region are defined once
 env:
   AWS_REGION: us-east-1
   ECR_REGISTRY: 534208808141.dkr.ecr.us-east-1.amazonaws.com
@@ -22,9 +39,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # -----------------------------------------------------------------------
+      # Checkout
+      # -----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # -----------------------------------------------------------------------
+      # AWS & ECR (only on push to main; PRs just build, no push)
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v4
@@ -39,12 +62,28 @@ jobs:
           aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
           docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
 
+      # -----------------------------------------------------------------------
+      # Docker build (with layer cache for faster rebuilds)
+      # -----------------------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
       - name: Build Docker image
-        run: docker build -t daynight-admin .
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: daynight-admin:latest
+          # Use GitHub Actions cache for Docker layers (faster subsequent builds)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Fail the job if build fails
+          push: false
 
+      # -----------------------------------------------------------------------
+      # Tag and push to ECR (only on push to main)
+      # Tag with run number for traceability; also update :latest
+      # -----------------------------------------------------------------------
       - name: Tag image for ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
@@ -58,3 +97,17 @@ jobs:
           IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
           docker push ${IMAGE}:${{ github.run_number }}
           docker push ${IMAGE}:latest
+
+      # -----------------------------------------------------------------------
+      # Job summary: show image location in the Actions run UI
+      # -----------------------------------------------------------------------
+      - name: Add job summary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
+          echo "## Docker image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | Image URI |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ github.run_number }}\` | \`${IMAGE}:${{ github.run_number }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`latest\` | \`${IMAGE}:latest\` |" >> $GITHUB_STEP_SUMMARY
