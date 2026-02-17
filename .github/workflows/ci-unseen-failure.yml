@@ -1,0 +1,21 @@
+name: CI Unseen Failure Fixture
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/ci-unseen-failure.yml'
+
+jobs:
+  unseen_failure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit novel failure signature
+        run: |
+          echo "PH_UNSEEN_FAILURE_SIGNATURE: quantum-cache-coherence-breach"
+          echo "This fixture intentionally fails for PipelineHealer unknown-pattern testing."
+      - name: Force hard failure
+        run: |
+          echo "Exiting with code 42 to force workflow failure"
+          exit 42
